@@ -1,16 +1,16 @@
-from distutils.core import setup
-
+from setuptools import setup
 
 setup(
     name='multihash',
-    version='0.1.1',
+    use_scm_version=True,
+    setup_requires=['setuptools_scm'],
     py_modules=['multihash'],
     author='Wijnand Modderman-Lenstra',
     author_email='maze@pyth0n.org',
     maintainer='Wijnand Modderman-Lenstra',
     maintainer_email='maze@pyth0n.org',
     url='https://github.com/tehmaze/python-multihash',
-    keywords='multihash sha1 sha2 sha3 blake2',
+    keywords='multihash',
     platforms='POSIX, Windows',
     license='MIT',
     description='multihash implementation in Python',
