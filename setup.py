@@ -14,6 +14,7 @@ setup(
     platforms='POSIX, Windows',
     license='MIT',
     description='multihash implementation in Python',
+    test_suite="tests",
     install_requires=[
         'sha3;python_version<"3.6"',
         'pyblake2;python_version<"3.6"',

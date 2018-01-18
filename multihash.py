@@ -1,96 +1,85 @@
 """Multihash implementation in Python."""
 
+import warnings
 import hashlib
 import struct
-import sys
+import io
 
 import six
 
-# Optional SHA-3 hashing via pysha3
+# These are the subset of https://raw.githubusercontent.com/multiformats/multihash/master/hashtable.csv
+# which are supported by hashlib or external libraries
+
+# TODO: perhaps we should just make this periodically rebuilt from hashtable.csv?
+CODECS = [
+    ('md5', 0xd5, hashlib.md5),
+    ('sha1', 0x11, hashlib.sha1),
+    ('sha2-256', 0x12, hashlib.sha256),
+    ('sha2-512', 0x13, hashlib.sha512),
+]
+
 try:
-    import sha3
-except ImportError:
-    sha3 = None
+    # Python 3.6 has SHA-3 support built-in; the sha3 backport will add those values to hashlib:
+    if not hasattr(hashlib, 'sha3_512'):
+        import sha3  # NOQA
 
-# Optional BLAKE2 hashing via pyblake2
+    CODECS.extend((
+        ('sha3-224', 0x17, hashlib.sha3_224),
+        ('sha3-256', 0x16, hashlib.sha3_256),
+        ('sha3-384', 0x15, hashlib.sha3_384),
+        ('sha3-512', 0x14, hashlib.sha3_512),
+    ))
+except ImportError:
+    warnings.warn('multihash requires the sha3 library to be installed on Python <3.6')
+
+
 try:
-    import pyblake2
+    if not hasattr(hashlib, 'blake2b'):
+        import pyblake2
+        hashlib.blake2b = pyblake2.blake2b
+        hashlib.blake2s = pyblake2.blake2s
+
+    CODECS.extend((
+        ('blake2b-64', 0xb208, hashlib.blake2b),
+        ('blake2s-32', 0xb244, hashlib.blake2s),
+    ))
 except ImportError:
-    pyblake2 = None
+    warnings.warn('multihash requires the sha3 library to be installed on Python <3.6')
 
+# Since these are accessed frequently we'll have some convenience lookup dictionaries:
+CODECS_BY_NAME = {name: function for name, code, function in CODECS}
+CODECS_BY_CODE = {code: function for name, code, function in CODECS}
+CODES_BY_NAME = {name: code for name, code, function in CODECS}
 
-# Constants
-SHA1 = 0x11
-SHA2_256 = 0x12
-SHA2_512 = 0x13
-SHA3 = 0x14
-BLAKE2B = 0x40
-BLAKE2S = 0x41
-
-NAMES = {
-    'sha1':     SHA1,
-    'sha2-256': SHA2_256,
-    'sha2-512': SHA2_512,
-    'sha3':     SHA3,
-    'blake2b':  BLAKE2B,
-    'blake2s':  BLAKE2S,
+DIGEST_BYTE_LENGTHS = {
+    'md5':          16,
+    'sha1':         20,
+    'sha2-256':     32,
+    'sha2-512':     64,
+    'sha3-512':     64,
+    'blake2b':      64,
+    'blake2s':      32,
 }
 
-CODES = dict((v, k) for k, v in NAMES.items())
 
-LENGTHS = {
-    'sha1':    20,
-    'sha256':  32,
-    'sha512':  64,
-    'sha3':    64,
-    'blake2b': 64,
-    'blake2s': 32,
-}
+def get_hash_function(hash_identifier):
+    """Return an initialised hash object, by function, name or integer id"""
 
-FUNCS = {
-    SHA1: hashlib.sha1,
-    SHA2_256: hashlib.sha256,
-    SHA2_512: hashlib.sha512,
-}
+    if six.callable(hash_identifier):
+        return hash_identifier()
+    elif isinstance(hash_identifier, six.integer_types):
+        return CODECS_BY_CODE[hash_identifier]
+    elif isinstance(hash_identifier, six.string_types):
+        if hash_identifier == 'sha3':
+            warnings.warn('The codec name "sha3" should be "sha3-512"', category=DeprecationWarning)
+            return CODECS_BY_NAME['sha3-512']
 
-if sha3:
-    FUNCS[SHA3] = lambda: hashlib.new('sha3_512')
+        if hash_identifier in CODECS_BY_NAME:
+            return CODECS_BY_NAME[hash_identifier]
+        elif hash_identifier.isdigit():
+            return CODECS_BY_CODE[int(hash_identifier)]
 
-if pyblake2:
-    FUNCS[BLAKE2B] = lambda: pyblake2.blake2b()
-    FUNCS[BLAKE2S] = lambda: pyblake2.blake2s()
-
-
-def _hashfn(hashfn):
-    """Return an initialised hash object, by function, name or integer id
-
-    >>> _hashfn(SHA1) # doctest: +ELLIPSIS
-    <sha1 HASH object @ 0x...>
-
-    >>> _hashfn('sha2-256') # doctest: +ELLIPSIS
-    <sha256 HASH object @ 0x...>
-    >>> _hashfn('18') # doctest: +ELLIPSIS
-    <sha256 HASH object @ 0x...>
-
-    >>> _hashfn('md5')
-    Traceback (most recent call last):
-      ...
-    ValueError: Unknown hash function "md5"
-    """
-    if six.callable(hashfn):
-        return hashfn()
-
-    elif isinstance(hashfn, six.integer_types):
-        return FUNCS[hashfn]()
-
-    elif isinstance(hashfn, six.string_types):
-        if hashfn in NAMES:
-            return FUNCS[NAMES[hashfn]]()
-
-        elif hashfn.isdigit():
-            return _hashfn(int(hashfn))
-
-    raise ValueError('Unknown hash function "{0}"'.format(hashfn))
+    raise ValueError('Unknown hash function "{0}"'.format(hash_identifier))
 
 
 def is_app_code(code):
@@ -101,44 +90,43 @@ def is_app_code(code):
     >>> is_app_code(0)
     True
     """
+
     if isinstance(code, six.integer_types):
         return code >= 0 and code < 0x10
-
     else:
         return False
 
 
 def is_valid_code(code):
-    """Check if the digest algorithm code is valid.
+    """Check if the digest algorithm code is valid"""
 
-    >>> is_valid_code(SHA1)
-    True
-    >>> is_valid_code(0)
-    True
-    """
-    if is_app_code(code):
+    warnings.warn('is_valid_code() is deprecated; use get_code() instead', DeprecationWarning)
+
+    if get_code(code):
         return True
-
-    elif isinstance(code, six.integer_types):
-        return code in CODES
-
     else:
         return False
+
+
+def get_code(identifier):
+    if identifier in CODECS_BY_CODE:
+        return identifier
+    elif identifier in CODES_BY_NAME:
+        return CODES_BY_NAME[identifier]
+    elif is_app_code(identifier):
+        return identifier
+    else:
+        raise ValueError('%s is not a recognized codec identifier' % identifier)
 
 
 def decode(buf):
     r"""Decode a hash from the given Multihash.
 
     After validating the hash type and length in the two prefix bytes, this
-    function removes them and returns the raw hash.
-
-    >>> encoded = b'\x11\x14\xc3\xd4XGWbx`AAh\x01%\xa4o\xef9Nl('
-    >>> bytearray(decode(encoded))
-    bytearray(b'\xc3\xd4XGWbx`AAh\x01%\xa4o\xef9Nl(')
-
-    >>> decode(encoded) == encoded[2:] == hashlib.sha1(b'thanked').digest()
-    True
+    function removes them and returns the codec ID and the raw hash. For
+    supported hash functions the codec ID can be used with `get_hash_function()`.
     """
+
     if len(buf) < 3:
         raise ValueError('Buffer too short')
 
@@ -147,48 +135,67 @@ def decode(buf):
 
     code, length = struct.unpack('BB', buf[:2])
 
-    if not is_valid_code(code):
+    # This is stricter than get_code since it should only check the numeric code values:
+    if code not in CODECS_BY_CODE:
         raise ValueError('Invalid code "{0}"'.format(code))
 
     digest = buf[2:]
     if len(digest) != length:
-        raise ValueError('Inconsistent length ({0} != {1})'.format(
-            len(digest), length))
+        raise ValueError('Inconsistent length ({0} != {1})'.format(len(digest), length))
 
-    return digest
+    return code, digest
 
 
-def encode(content, code):
-    """Encode a binary or text string using the digest function corresponding
-    to the given code.  Returns the hash of the content, prefixed with the
-    code and the length of the digest, according to the Multihash spec.
-
-    >>> encoded = encode('testing', SHA1)
-    >>> len(encoded)
-    22
-    >>> encoded[:2]
-    bytearray(b'\\x11\\x07')
-
-    >>> encoded = encode('works with sha3?', SHA3)
-    >>> len(encoded)
-    66
-    >>> encoded[:2]
-    bytearray(b'\\x14\\x10')
+def encode(content, codec_identifier):
     """
-    if not is_valid_code(code):
-        raise TypeError('Unknown code')
+    Return the multihash-format digest for the provided content and codec type
 
-    hashfn = _hashfn(code)
+    :param content:
+        The payload as bytes, text (which will be calculated assuming UTF-8 encoding),
+        a file-like object compatible with io.BufferedReader, or an iterable which
+        yields bytes.
+
+    :param codec_identifier:
+        The name or multihash code ID for the codec to use
+    """
+
+    code = get_code(codec_identifier)
+
+    hash_function = get_hash_function(code)
+
+    hasher = hash_function()
 
     if isinstance(content, six.binary_type):
-        hashfn.update(content)
+        hasher.update(content)
     elif isinstance(content, six.string_types):
-        hashfn.update(content.encode('utf-8'))
+        hasher.update(content.encode('utf-8'))
+    elif isinstance(content, io.BufferedReader):
+        while True:
+            chunk = content.read(1048576)
+            if len(chunk) == 0:
+                break
+            hasher.update(chunk)
+    elif hasattr(content, '__iter__'):
+        for chunk in content:
+            hasher.update(chunk)
+    else:
+        raise TypeError('%r is not a supported input type. Provide bytes, unicode,'
+                        ' an io.BufferedReader file-like object, or an iteratable yielding bytes')
 
-    digest = hashfn.digest()
+    digest = hasher.digest()
+
+    return encode_multihash(digest, code)
+
+
+def encode_multihash(digest, code):
+    """
+    Given a precalculated digest, return the multihash packed code + digest value
+    """
+
     if len(digest) > 127:
-        raise ValueError('Multihash does not support digest length > 127')
+        raise ValueError('multihash does not support digest length > 127')
 
     output = bytearray([code, len(digest)])
     output.extend(digest)
+
     return output
